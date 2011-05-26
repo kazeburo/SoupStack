@@ -16,15 +16,15 @@ my $file = do { local $/; <$fh> };
 
 for my $id (1..100){    
     ok($storage->put(id=>$id, fh=>$fh));
-    my $fh1 = $storage->get(id=>$id);
+    my $fh1 = $storage->get($id);
     ok($fh1);
     my $file1 = do { local $/; <$fh1> };
     is($file, $file1);
 }
 
 for my $id (1..100){
-    ok($storage->delete(id=>$id));
-    my $fh1 = $storage->get(id=>$id);
+    ok($storage->delete($id));
+    my $fh1 = $storage->get($id);
     ok(!$fh1)
 }
 

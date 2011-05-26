@@ -59,14 +59,7 @@ sub find_pos {
 
 sub put_pos {
     my $self = shift;
-    state $rule = Data::Validator->new(
-        id => 'Str',
-        stack => 'Int',
-        offset => 'Int',
-        size => 'Int',
-    );
-    my $args = $rule->validate(@_);
-
+    my $args = shift;
     my $pos = Data::MessagePack->pack({
         stack => $args->{stack},
         offset => $args->{offset},
@@ -95,13 +88,7 @@ sub open_stack {
 }
 
 sub get {
-    my $self = shift;
-    state $rule = Data::Validator->new(
-        id => 'Str',
-    );
-    my $args = $rule->validate(@_);
-    my $id = $args->{id};
-
+    my ($self,$id) = @_;
     my $pos = $self->find_pos($id);
     return unless $pos;
 
@@ -123,12 +110,8 @@ sub get {
 }
 
 sub delete {
-    my $self = shift;
-    state $rule = Data::Validator->new(
-        id => 'Str',
-    );
-    my $args = $rule->validate(@_);
-    $self->delete_pos($args->{id});
+    my ($self,$id) = @_;
+    $self->delete_pos($id);
     return 1;
 }
 
