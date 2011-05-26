@@ -2,6 +2,7 @@ use strict;
 use Test::More;
 use SoupStack::Storage;
 use File::Temp qw/tempdir/;
+use List::Util qw/shuffle/;
 
 my $dir = tempdir( CLEANUP => 1 );
 
@@ -20,6 +21,11 @@ for my $id (1..100){
     ok($fh1);
     my $file1 = do { local $/; <$fh1> };
     is($file, $file1);
+}
+
+for my $id (shuffle 1..100){
+    my $fh1 = $storage->get($id);
+    ok($fh1);
 }
 
 for my $id (1..100){
