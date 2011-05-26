@@ -2,87 +2,86 @@ package SoupStack;
 
 use strict;
 use warnings;
+use 5.10.0;
 use Plack::Builder;
 use Router::Simple;
 use HTTP::Exception;
 use Try::Tiny;
-use Scope::Container::DBI;
-use Data::MessagePack;
+use SoupStack::Storage;
 use Mouse;
-use SoupStack::Constraints;
 
 our $VERSION = '0.01';
 
 has 'root' => (
     is => 'ro',
-    isa => 'RootDir',
+    isa => 'Str',
     coerce => 1,
 );
 
 has 'max_file_size' => (
     is => 'ro',
     isa => 'Int',
-    default => 5_000_000 
+    default => 1_000_000_000 
 );
+
+has 'storage' => (
+    is => 'ro',
+    isa => 'SoupStack::Storage',
+    lazy_build => 1,
+);
+
+sub _build_model {
+    my $self = shift;
+    SoupStack::Storage->new(
+        root => $self->root,
+        max_file_size => $self->max_file_size
+    );
+}
 
 __PACKAGE__->meta->make_immutable();
 
-my $_on_connect = sub {
-    my $connect = shift;
-    $connect->do(<<EOF);
-CREATE TABLE IF NOT EXISTS stack (
-    id BIGINT UNSIGNED NOT NULL PRIMARY KEY,
-    pos BLOB NOT NULL
-)
-EOF
-    return;
-};
-
-sub db {
-    my $self = shift;
-    my $path = $self->root->file("stack.db");
-    local $Scope::Container::DBI::DBI_CLASS = 'DBIx::Sunny';
-    Scope::Container::DBI->connect( 'dbi:SQLite:dbname=$path','','', {
-        Callbacks => {
-            connected => $_on_connect,
-        },
-    });
+sub get_object {
+    my ($self,$c) = @_;
+    my $id = $c->args->{id};
+    my $fh = $c->storage->get($id);
+    HTTP::Exception->throw(404) unless $fh;
+    $c->res->body($fh);
+    $c->res;
 }
 
-sub find_pos {
+sub put_object {
+    my ($self,$c) = @_;
+    my $id = $c->args->{id};
+    my $fh = $c->storage->put(id=>$id,fh=>$c->req->body);
+    $c->res->body('OK');
+    $c->res;
 }
 
-sub update_pos {
+sub delete_object {
+    my ($self,$c) = @_;
+    my $id = $c->args->{id};
+    my $fh = $c->storage->get($id);
+    $c->res->body('OK');
+    $c->res;    
 }
-
-sub delete_pos {
-}
-
-sub flock {
-    my $self = shift;
-    my $num = shift;
-}
-
-
 
 sub build_app {
     my $self = shift;
 
     #router
     my $router = Router::Simple->new;
-
     $router->connect(
-        '/{bucket:[0-9]+}/*',
+        '/{id:[a-zA-Z0-9/_\-%]+}',
         { action => 'get_object' },
         { method => ['GET','HEAD'] }
     );
     $router->connect(
-        '/{bucket:[0-9]+}/*',
+        '/{id:[a-zA-Z0-9/_\-%]+}',
         { action => 'put_object' },
         { method => ['PUT'] }
     );
     $router->connect(
-        '/{bucket:[0-9]+}/*',
+        '/{id:[a-zA-Z0-9/_\-%]+}',
         { action => 'delete_object' },
         { method => ['DELETE'] }
     );
