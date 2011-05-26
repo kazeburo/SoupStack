@@ -122,7 +122,13 @@ sub open_stack {
 }
 
 sub get {
-    my ($self,$id) = @_;
+    my $self = shift;
+    state $rule = Data::Validator->new(
+        id => 'Int',
+    );
+    my $args = $rule->validate(@_);
+    my $id = $args->{id};
+
     my $pos = $self->find_pos( id => $id );
     return unless $pos;
 
@@ -144,14 +150,23 @@ sub get {
 }
 
 sub delete {
-    my ($self,$id) = @_;
-    $self->delete_pos( id => $id );
+    my $self = shift;
+    state $rule = Data::Validator->new(
+        id => 'Int',
+    );
+    my $args = $rule->validate(@_);
+    $self->delete_pos( id => $args->{id} );
     return 1;
 }
 
 sub put {
     my $self = shift;
-    my ($id,$fh) = @_;
+    state $rule = Data::Validator->new(
+        id => 'Int',
+        fh => 'GlobRef'
+    );
+    my $args = $rule->validate(@_);
+    my ($id,$fh) = map { $args->{$_} } qw/id fh/;
 
     my $size = sysseek( $fh, 0, SEEK_END );
     sysseek($fh, 0, SEEK_SET );
