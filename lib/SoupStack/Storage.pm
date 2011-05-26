@@ -33,7 +33,7 @@ has 'fh_cache' => (
 
 sub _build_fh_cache {
     my $self = shift;
-    Cache::LRU->new( size => 16 );
+    Cache::LRU->new( size => 20 );
 }
 
 __PACKAGE__->meta->make_immutable();
@@ -41,40 +41,65 @@ __PACKAGE__->meta->make_immutable();
 our $OBJECT_HEAD_OFFSET = 8;
 our $READ_BUFFER = 2*1024*1024;
 
-sub db {
+sub index_db {
     my $self = shift;
-    return $self->{_db} if $self->{_db};
-    my $path = $self->root . "/stack.kch";
+    return $self->{_index_db} if $self->{_index_db};
+    my $path = $self->root . "/index.kch";
     my $db = KyotoCabinet::DB->new;
     $db->open($path, $db->OWRITER | $db->OCREATE) or die $db->error;
-    $self->{_db} = $db;
+    $self->{_index_db} = $db;
     $db;
 }
 
-sub find_pos {
+sub find_stack_index {
     my ($self,$id) = @_;
-    my $pos = $self->db->get($id);
+    my $index = $self->index_db->get($id);
+    return if ! defined $index;
+    $index
+}
+
+sub find_pos {
+    my $self = shift;
+    state $rule = Data::Validator->new(
+        id => 'Str',
+        index => 'Int',
+        rid => 'Int',
+    );
+    my $args = $rule->validate(@_);
+    my $key = sprintf "%s|%s|%s", $args->{index}, $args->{rid}, KyotoCabinet::hash_murmur($args->{id});
+    my $pos = $self->index_db->get($key);
     return if ! defined $pos;
     $pos = Data::MessagePack->unpack($pos);
-    my @args = qw/stack offset size/;
+    my @args = qw/offset size/;
     my %pos = mesh @args, @$pos;
     \%pos;
 }
 
 sub put_pos {
     my $self = shift;
-    my $args = shift;
-    my $pos = Data::MessagePack->pack([
-        $args->{stack},
+    state $rule = Data::Validator->new(
+        id => 'Str',
+        index => 'Int',
+        rid => 'Int',
+        offset => 'Int',
+        size => 'Int',
+    );
+    my $args = $rule->validate(@_);
+    my $packed = Data::MessagePack->pack([
         $args->{offset},
         $args->{size},
     ]);
-    $self->db->set($args->{id}, $pos) or die $self->db->error;
+
+    my $key = sprintf "%s|%s|%s", $args->{index}, $args->{rid}, 
+        KyotoCabinet::hash_murmur($args->{id});
+
+    $self->index_db->set($args->{id}, $args->{index}) or die $self->db->error;
+    $self->index_db->set($key, $packed) or die $self->db->error;
 }
 
 sub delete_pos {
     my ($self,$id) = @_;
-    $self->db->remove($id);
+    $self->index_db->remove($id);
 }
 
 sub stack_index {
@@ -84,21 +109,35 @@ sub stack_index {
 
 sub open_stack {
     my ($self,$index) = @_;
-    my $fh_cache = $self->fh_cache->get($index);
-    return $fh_cache if $fh_cache;
-    sysopen( my $fh, sprintf("%s/stack_%010d",$self->root,$index), O_RDWR|O_CREAT ) or die $!;
-    $self->fh_cache->set( $index, $fh);
-    $fh;
+    my $key = sprintf "stack_%010d", $index;
+    my $path = $self->root . '/' . $key;
+    my $cached = $self->fh_cache->get($key);
+    if ( $cached ) {
+        my @stat = stat $path;
+        return $cached if ( $stat[1] == $cached->{rid} );
+    }
+    sysopen( my $fh, $path, O_RDWR|O_CREAT ) or die $!;
+    my @stat = stat $path;
+    my $stack = { rid => $stat[1], fh => $fh };
+    $self->fh_cache->set( $index, $stack);
+    $stack;
 }
 
 sub get {
     my ($self,$id) = @_;
-    my $pos = $self->find_pos($id);
+
+    my $index = $self->find_stack_index($id);
+    return unless $index;
+    my $stack = $self->open_stack($index);
+
+    my $pos = $self->find_pos(
+        id => $id,
+        index => $index,
+        rid => $stack->{rid},
+    );
     return unless $pos;
 
-    my $fh = $self->open_stack($pos->{stack});
-    sysseek( $fh, $pos->{offset} + $OBJECT_HEAD_OFFSET, SEEK_SET ) or die $!;
-
+    sysseek( $stack->{fh}, $pos->{offset} + $OBJECT_HEAD_OFFSET, SEEK_SET ) or die $!;
     my $size = $pos->{size};
     
     my $buffer='';
@@ -109,7 +148,7 @@ sub get {
     }
     while ( $size ) {
         my $len = ( $size > $READ_BUFFER ) ? $READ_BUFFER : $size;
-        my $readed = sysread( $fh, my $read, $len);
+        my $readed = sysread( $stack->{fh}, my $read, $len);
         die $! if ! defined $readed;
         $size = $size - $readed;
         if ( $perlbuf ) {
@@ -151,24 +190,28 @@ sub put {
     my $size = sysseek( $fh, 0, SEEK_END );
     sysseek($fh, 0, SEEK_SET );
 
-    my $index = $self->stack_index; #with lock
-    my $stack_id = $index->id;
-    my $stack_fh = $self->open_stack($stack_id);
+    die 'cannot store size > max_file_size' 
+        if $size >= $self->max_file_size;
 
-    my $offset = sysseek( $stack_fh, 0, SEEK_END ) // die $!;
+    my $stack_index = $self->stack_index; #with lock
+    my $index = $stack_index->id;
+    my $stack = $self->open_stack($index);
+
+    my $offset = sysseek( $stack->{fh}, 0, SEEK_END ) // die $!;
     $offset += 0;
     if ( $offset + $size > $self->max_file_size ) {
         $offset = 0;
-        $stack_id = $index->incr;
-        $stack_fh = $self->open_stack($stack_id);
+        $index = $stack_index->incr;
+        $stack = $self->open_stack($index);
     }
-    my $len = syswrite($stack_fh, pack('q',KyotoCabinet::hash_murmur($id)), $OBJECT_HEAD_OFFSET) or die $!;
+    my $len = syswrite($stack->{fh}, pack('q',KyotoCabinet::hash_murmur($id)), $OBJECT_HEAD_OFFSET) or die $!;
     die "couldnt write object header" if $len < 8;
-    copy( $fh, $stack_fh ) or die $!;
+    copy( $fh, $stack->{fh} ) or die $!;
 
     $self->put_pos({
         id => $id,
-        stack => $stack_id,
+        index => $index,
+        rid => $stack->{rid},
         offset => $offset,
         size => $size,
     });

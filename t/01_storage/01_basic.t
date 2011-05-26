@@ -28,7 +28,7 @@ for my $id (shuffle 1..100){
     ok($fh1);
 }
 
-for my $id (1..100){
+for my $id (1..100) {
     ok($storage->delete($id));
     my $fh1 = $storage->get($id);
     ok(!$fh1)

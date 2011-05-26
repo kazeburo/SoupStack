@@ -64,3 +64,5 @@ timethese(8,{
         }
     }
 });
+
+print `ls -l $dir`;
