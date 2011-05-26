@@ -13,7 +13,7 @@ seek($fh, 0, 0);
 warn length($file);
 
 
-timethese(3,{
+timethese(5,{
     soupstack => sub {
         my $dir = tempdir( CLEANUP => 1 );
         my $storage = SoupStack::Storage->new({
@@ -47,8 +47,8 @@ for my $id (1..2_000 ) {
     seek($fh, 0, 0);
 }
 
-timethese(3,{
-    soupstack => sub {
+timethese(8,{
+    read_soupstack => sub {
         my $storage = SoupStack::Storage->new({
             root => $dir,
             max_file_size => 10_000_000,
@@ -57,7 +57,7 @@ timethese(3,{
             $storage->get($id);
         }
     },
-    fileio => sub {
+    read_fileio => sub {
         for my $id ( shuffle 1..2_000 ) {
             open(my $fh1, "$dir/".murmur_hash($id) );
             my $result = do { local $/; <$fh1> };
