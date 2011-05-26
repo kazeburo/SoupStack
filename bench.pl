@@ -11,14 +11,14 @@ my $file = do { local $/; <$fh> };
 seek($fh, 0, 0);
 warn length($file);
 
-my $dir = tempdir( CLEANUP => 1 );
-my $storage = SoupStack::Storage->new({
-    root => $dir,
-    max_file_size => 10_000_000,
-});
 
 timethese(3,{
     soupstack => sub {
+        my $dir = tempdir( CLEANUP => 1 );
+        my $storage = SoupStack::Storage->new({
+            root => $dir,
+            max_file_size => 10_000_000,
+        });
         for my $id (1..2_000 ) {
             $storage->put(id=>$id, fh=>$fh);
         }
