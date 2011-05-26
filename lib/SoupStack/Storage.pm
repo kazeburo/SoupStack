@@ -3,14 +3,15 @@ package SoupStack::Storage;
 use strict;
 use warnings;
 use 5.10.0;
-use Mouse;
 use KyotoCabinet;
 use Data::MessagePack;
 use Data::Validator;
 use Fcntl qw/:DEFAULT :flock :seek/;
 use File::Copy;
 use Cache::LRU;
-use Plack::TempBuffer;
+use IO::File;
+use List::MoreUtils qw/mesh/;
+use Mouse;
 
 has 'root' => (
     is => 'ro',
@@ -38,7 +39,7 @@ sub _build_fh_cache {
 __PACKAGE__->meta->make_immutable();
 
 our $OBJECT_HEAD_OFFSET = 8;
-our $READ_BUFFER = 1024*1024;
+our $READ_BUFFER = 2*1024*1024;
 
 sub db {
     my $self = shift;
@@ -54,17 +55,20 @@ sub find_pos {
     my ($self,$id) = @_;
     my $pos = $self->db->get($id);
     return if ! defined $pos;
-    Data::MessagePack->unpack($pos);
+    $pos = Data::MessagePack->unpack($pos);
+    my @args = qw/stack offset size/;
+    my %pos = mesh @args, @$pos;
+    \%pos;
 }
 
 sub put_pos {
     my $self = shift;
     my $args = shift;
-    my $pos = Data::MessagePack->pack({
-        stack => $args->{stack},
-        offset => $args->{offset},
-        size => $args->{size},
-    });
+    my $pos = Data::MessagePack->pack([
+        $args->{stack},
+        $args->{offset},
+        $args->{size},
+    ]);
     $self->db->set($args->{id}, $pos) or die $self->db->error;
 }
 
@@ -97,16 +101,36 @@ sub get {
 
     my $size = $pos->{size};
     
-    my $buf = Plack::TempBuffer->new($size);
+    my $buffer='';
+    my $perlbuf = ( $size <= $READ_BUFFER ) ? 1 : 0;
+    if (!$perlbuf) {
+        $buffer = IO::File->new_tmpfile;
+        $buffer->binmode;
+    }
     while ( $size ) {
         my $len = ( $size > $READ_BUFFER ) ? $READ_BUFFER : $size;
         my $readed = sysread( $fh, my $read, $len);
         die $! if ! defined $readed;
         $size = $size - $readed;
-        $buf->print($read);
+        if ( $perlbuf ) {
+            $buffer .= $read;
+        }
+        else {
+            print $buffer $read;
+        }
     }
 
-    $buf->rewind;
+    my $buf;
+    if ( $perlbuf ) {
+        open( $buf, '<', \$buffer);
+        bless $buf, 'FileHandle';        
+    }
+    else {
+        $buf = $buffer;
+    }
+
+    seek($buf,0,0);
+    $buf;
 }
 
 sub delete {
