@@ -58,7 +58,7 @@ sub db {
     my $self = shift;
     my $path = $self->root->file("stack.db");
     local $Scope::Container::DBI::DBI_CLASS = 'DBIx::Sunny';
-    Scope::Container::DBI->connect('dbi:SQLite:dbname=$path','','', {
+    Scope::Container::DBI->connect("dbi:SQLite:dbname=$path",'','', {
         Callbacks => {
             connected => $_on_connect,
         },
