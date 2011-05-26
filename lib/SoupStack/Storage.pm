@@ -4,20 +4,17 @@ use strict;
 use warnings;
 use 5.10.0;
 use Mouse;
-use Scope::Container::DBI;
-use DBI qw(:sql_types);
+use KyotoCabinet;
 use Data::MessagePack;
 use Data::Validator;
 use Fcntl qw/:DEFAULT :flock :seek/;
 use File::Copy;
 use Cache::LRU;
-use SoupStack::Constraints;
 use Plack::TempBuffer;
 
 has 'root' => (
     is => 'ro',
-    isa => 'RootDir',
-    coerce => 1,
+    isa => 'Str',
     required => 1,
 );
 
@@ -43,43 +40,27 @@ __PACKAGE__->meta->make_immutable();
 our $OBJECT_HEAD_OFFSET = 8;
 our $READ_BUFFER = 1024*1024;
 
-my $_on_connect = sub {
-    my $connect = shift;
-    $connect->do(<<EOF);
-CREATE TABLE IF NOT EXISTS stack (
-    id BIGINT UNSIGNED NOT NULL PRIMARY KEY,
-    pos BLOB NOT NULL
-)
-EOF
-    return;
-};
-
 sub db {
     my $self = shift;
-    my $path = $self->root->file("stack.db");
-    local $Scope::Container::DBI::DBI_CLASS = 'DBIx::Sunny';
-    Scope::Container::DBI->connect("dbi:SQLite:dbname=$path",'','', {
-        Callbacks => {
-            connected => $_on_connect,
-        },
-    });
+    return $self->{_db} if $self->{_db};
+    my $path = $self->root . "/stack.kch";
+    my $db = KyotoCabinet::DB->new;
+    $db->open($path, $db->OWRITER | $db->OCREATE) or die $db->error;
+    $self->{_db} = $db;
+    $db;
 }
 
 sub find_pos {
-    my $self = shift;
-    state $rule = Data::Validator->new(
-        id => 'Int',
-    );
-    my $args = $rule->validate(@_);
-    my $pos = $self->db->select_one('SELECT pos FROM stack WHERE id=?', $args->{id});
-    return unless $pos;
+    my ($self,$id) = @_;
+    my $pos = $self->db->get($id);
+    return if ! defined $pos;
     Data::MessagePack->unpack($pos);
 }
 
 sub put_pos {
     my $self = shift;
     state $rule = Data::Validator->new(
-        id => 'Int',
+        id => 'Str',
         stack => 'Int',
         offset => 'Int',
         size => 'Int',
@@ -91,20 +72,12 @@ sub put_pos {
         offset => $args->{offset},
         size => $args->{size},
     });
-    
-    my $sth = $self->db->prepare(q{INSERT OR REPLACE INTO stack (id, pos) VALUES ( ?, ?)});
-    $sth->bind_param(1, $args->{id}, SQL_INTEGER);
-    $sth->bind_param(2, $pos, SQL_BLOB);
-    $sth->execute;
+    $self->db->set($args->{id}, $pos) or die $self->db->error;
 }
 
 sub delete_pos {
-    my $self = shift;
-    state $rule = Data::Validator->new(
-        id => 'Int',
-    );
-    my $args = $rule->validate(@_);
-    $self->db->select_one('DELETE FROM stack WHERE id=?', $args->{id});
+    my ($self,$id) = @_;
+    $self->db->remove($id);
 }
 
 sub stack_index {
@@ -116,7 +89,7 @@ sub open_stack {
     my ($self,$index) = @_;
     my $fh_cache = $self->fh_cache->get($index);
     return $fh_cache if $fh_cache;
-    sysopen( my $fh, $self->root->file(sprintf("stack_%010d",$index)), O_RDWR|O_CREAT ) or die $!;
+    sysopen( my $fh, sprintf("%s/stack_%010d",$self->root,$index), O_RDWR|O_CREAT ) or die $!;
     $self->fh_cache->set( $index, $fh);
     $fh;
 }
@@ -124,12 +97,12 @@ sub open_stack {
 sub get {
     my $self = shift;
     state $rule = Data::Validator->new(
-        id => 'Int',
+        id => 'Str',
     );
     my $args = $rule->validate(@_);
     my $id = $args->{id};
 
-    my $pos = $self->find_pos( id => $id );
+    my $pos = $self->find_pos($id);
     return unless $pos;
 
     my $fh = $self->open_stack($pos->{stack});
@@ -152,17 +125,17 @@ sub get {
 sub delete {
     my $self = shift;
     state $rule = Data::Validator->new(
-        id => 'Int',
+        id => 'Str',
     );
     my $args = $rule->validate(@_);
-    $self->delete_pos( id => $args->{id} );
+    $self->delete_pos($args->{id});
     return 1;
 }
 
 sub put {
     my $self = shift;
     state $rule = Data::Validator->new(
-        id => 'Int',
+        id => 'Str',
         fh => 'GlobRef'
     );
     my $args = $rule->validate(@_);
@@ -182,7 +155,7 @@ sub put {
         $stack_id = $index->incr;
         $stack_fh = $self->open_stack($stack_id);
     }
-    my $len = syswrite($stack_fh, pack('Q',$id), 8) or die $!;
+    my $len = syswrite($stack_fh, pack('q',KyotoCabinet::hash_murmur($id)), $OBJECT_HEAD_OFFSET) or die $!;
     die "couldnt write object header" if $len < 8;
     copy( $fh, $stack_fh ) or die $!;
 
@@ -204,23 +177,20 @@ use strict;
 use warnings;
 use Mouse;
 use Fcntl qw/:DEFAULT :flock :seek/;
-use SoupStack::Constraints;
 
 has 'root' => (
     is => 'ro',
-    isa => 'RootDir',
-    coerce => 1,
+    isa => 'Str',
     required => 1,
 );
 
 sub BUILD {
     my $self = shift;
-    my $path = $self->root->file("stack.index");
+    my $path = $self->root ."/stack.index";
     sysopen( my $fh, $path, O_RDWR|O_CREAT ) or die "Couldnt open lockfile: $!";
     flock( $fh, LOCK_EX ) or die "Couldnt get lock: $!";
     $self->{_fh} = $fh;
 
-    sysseek( $fh, 0, SEEK_SET) or die $!;
     sysread( $fh, my $id, 32) // die $!;
 
     if ( !$id ) {

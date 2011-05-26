@@ -5,8 +5,6 @@ use File::Temp qw/tempdir/;
 
 my $dir = tempdir( CLEANUP => 1 );
 
-for (1..2) {
-
 my $storage = SoupStack::Storage->new({
     root => $dir,
     max_file_size => 1_000_000,
@@ -30,7 +28,6 @@ for my $id (1..100){
     ok(!$fh1)
 }
 
-}
 
 done_testing;
 
