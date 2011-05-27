@@ -12,7 +12,6 @@ my $file = do { local $/; <$fh> };
 seek($fh, 0, 0);
 warn length($file);
 
-
 timethese(5,{
     soupstack => sub {
         my $dir = tempdir( CLEANUP => 1 );
@@ -21,7 +20,7 @@ timethese(5,{
             max_file_size => 10_000_000,
         });
         for my $id ( shuffle 1..2_000 ) {
-            $storage->put(id=>$id, fh=>$fh);
+            $storage->put($id, $fh);
         }
     },
     fileio => sub {
@@ -39,7 +38,7 @@ my $storage = SoupStack::Storage->new({
     max_file_size => 10_000_000,
 });
 for my $id (1..2_000 ) {
-    $storage->put(id=>$id, fh=>$fh);
+    $storage->put($id, $fh);
 }
 
 for my $id (1..2_000 ) {
@@ -49,10 +48,10 @@ for my $id (1..2_000 ) {
 
 timethese(8,{
     read_soupstack => sub {
-        my $storage = SoupStack::Storage->new({
-            root => $dir,
-            max_file_size => 10_000_000,
-        });
+#        my $storage = SoupStack::Storage->new({
+#            root => $dir,
+#            max_file_size => 10_000_000,
+#        });
         for my $id ( shuffle 1..2_000 ) {
             $storage->get($id);
         }
@@ -65,4 +64,4 @@ timethese(8,{
     }
 });
 
-print `ls -l $dir`;
+

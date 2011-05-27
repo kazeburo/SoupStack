@@ -15,20 +15,20 @@ ok($storage);
 open(my $fh, __FILE__);
 my $file = do { local $/; <$fh> };
 
-for my $id (1..100){    
-    ok($storage->put(id=>$id, fh=>$fh));
+for my $id (1..20){    
+    ok($storage->put($id, $fh));
     my $fh1 = $storage->get($id);
     ok($fh1);
     my $file1 = do { local $/; <$fh1> };
     is($file, $file1);
 }
 
-for my $id (shuffle 1..100){
+for my $id (shuffle 1..20){
     my $fh1 = $storage->get($id);
     ok($fh1);
 }
 
-for my $id (1..100) {
+for my $id (1..20) {
     ok($storage->delete($id));
     my $fh1 = $storage->get($id);
     ok(!$fh1)
