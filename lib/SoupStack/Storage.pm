@@ -3,6 +3,7 @@ package SoupStack::Storage;
 use strict;
 use warnings;
 use 5.10.0;
+use DBI qw(:sql_types);
 use KyotoCabinet;
 use Data::Validator;
 use Fcntl qw/:DEFAULT :flock :seek/;
@@ -45,11 +46,29 @@ our $READ_BUFFER = 2*1024*1024;
 
 sub index_db {
     my $self = shift;
-    return $self->{_index_db} if $self->{_index_db};
-    my $path = $self->root . "/index.kch";
-    my $db = KyotoCabinet::DB->new;
-    $db->open($path, $db->OWRITER | $db->OCREATE) or die $db->error;
-    $self->{_index_db} = $db;
+    if ( my $dbs = $self->{_index_db} ) {
+        return $dbs->[0] if $dbs->[1] == $$;
+    }
+    my $path = $self->root . "/index.db";
+    my $db = DBI->connect("dbi:SQLite:dbname=$path",'','',{
+        RaiseError => 1,
+        PrintError => 1,
+        ShowErrorStatement => 1,
+        AutoInactiveDestroy => 1,
+        Callbacks => {
+            connected => sub {
+                my $connect = shift;
+                $connect->do(<<EOF);
+CREATE TABLE IF NOT EXISTS kvs (
+    id BIGINT NOT NULL PRIMARY KEY,
+    bv BLOB NOT NULL
+)
+EOF
+                return;
+            },
+        },
+    });
+    $self->{_index_db} = [$db,$$];
     $db;
 }
 
@@ -57,22 +76,43 @@ sub stack_db {
     my $self = shift;
     my ($index, $rid) = @_;
 
-    my $key = sprintf "stack_%010d_%s.kch", $index, $rid;
-    my $cached = $self->fh_cache->get($key);
-    return $cached if $cached;
+    my $key = sprintf "stack_db_%010d_%s.db", $index, $rid;
+    if ( my $dbs = $self->fh_cache->get($key) ) {
+        return $dbs->[0] if $dbs->[1] == $$;
+    }
 
     my $path = $self->root . '/' . $key;
-    my $db = KyotoCabinet::DB->new;
-    $db->open($path, $db->OWRITER | $db->OCREATE) or die $db->error;
-    $self->fh_cache->set($key,$db);
+    my $db = DBI->connect("dbi:SQLite:dbname=$path",'','',{
+        RaiseError => 1,
+        PrintError => 1,
+        ShowErrorStatement => 1,
+        AutoInactiveDestroy => 1,
+        Callbacks => {
+            connected => sub {
+                my $connect = shift;
+                $connect->do(<<EOF);
+CREATE TABLE IF NOT EXISTS kvs (
+    id BIGINT NOT NULL PRIMARY KEY,
+    bv BLOB NOT NULL
+)
+EOF
+                return;
+            },
+        },
+    });
+
+    $self->fh_cache->set($key,[$db,$$]);
     $db;
 }
 
 sub find_stack_index {
     my ($self,$id) = @_;
-    my $index = $self->index_db->get(KyotoCabinet::hash_murmur($id));
-    return if ! defined $index;
-    $index
+    my $row = $self->index_db->selectrow_arrayref(
+        'SELECT bv FROM kvs WHERE id =?', {},
+        KyotoCabinet::hash_murmur($id)
+    );
+    return unless $row;
+    $row->[0];
 }
 
 sub find_pos {
@@ -81,13 +121,16 @@ sub find_pos {
 
     my $key = KyotoCabinet::hash_murmur($args->{id});
 
-    my $pos = $self->stack_db(
+    my $stack_db = $self->stack_db(
         $args->{index},
         $args->{rid}
-    )->get($key);
-
-    return if ! defined $pos;
-    my @pos = unpack "QQ",$pos;
+    );
+    my $row = $stack_db->selectrow_arrayref(
+        'SELECT bv FROM kvs WHERE id =?', {},
+        $key
+    );
+    return unless $row;
+    my @pos = unpack "QQ",$row->[0];
     return {
         offset => $pos[0],
         size => $pos[1],
@@ -106,16 +149,30 @@ sub put_pos {
     my $args = $rule->validate(@_);
     my $key = KyotoCabinet::hash_murmur($args->{id});
     my $packed = pack "QQ",$args->{offset}, $args->{size};
-    $self->index_db->set($key, $args->{index}) or die $self->db->error;
-    $self->stack_db(
+
+    my $stack_db = $self->stack_db(
         $args->{index},
-        $args->{rid},
-    )->set($key, $packed) or die $self->db->error;
+        $args->{rid}
+    );
+    my $sth = $stack_db->prepare_cached(q{INSERT OR REPLACE INTO kvs (id, bv) VALUES ( ?, ?)});
+    $sth->bind_param(1, $key, SQL_INTEGER);
+    $sth->bind_param(2, $packed, SQL_BLOB);
+    $sth->execute;
+    $sth->finish;
+
+    $sth = $self->index_db->prepare_cached(q{INSERT OR REPLACE INTO kvs (id, bv) VALUES ( ?, ?)});
+    $sth->bind_param(1, $key, SQL_INTEGER);
+    $sth->bind_param(2, $args->{index}, SQL_BLOB);
+    $sth->execute;
+    $sth->finish;
 }
 
 sub delete_pos {
     my ($self,$id) = @_;
-    $self->index_db->remove(KyotoCabinet::hash_murmur($id));
+    my $sth = $self->index_db->prepare_cached(q{DELETE FROM kvs WHERE id=?});
+    $sth->bind_param(1, KyotoCabinet::hash_murmur($id), SQL_INTEGER);
+    $sth->execute;
+    $sth->finish;
 }
 
 sub stack_index {
@@ -241,7 +298,6 @@ sub put {
         offset => $offset,
         size => $size,
     });
-
     1;
 }
 
@@ -253,7 +309,7 @@ use strict;
 use warnings;
 use Mouse;
 use Fcntl qw/:DEFAULT :flock :seek/;
-
+use Time::HiRes;
 has 'root' => (
     is => 'ro',
     isa => 'Str',
@@ -293,7 +349,7 @@ sub incr {
 sub DEMOLISH {
     my $self = shift;
     return if !$self->{_fh};
-    flock( $self->{_fh}, LOCK_UN ) or die "$!";
+    flock( $self->{_fh}, LOCK_UN ) or die "unlockerror: $!";
 }
 
 __PACKAGE__->meta->make_immutable();
