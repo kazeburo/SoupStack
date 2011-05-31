@@ -3,13 +3,9 @@ package SoupStack::Storage;
 use strict;
 use warnings;
 use 5.10.0;
-use DBI qw(:sql_types);
-use KyotoCabinet;
-use Data::Validator;
 use Fcntl qw/:DEFAULT :flock :seek/;
 use File::Copy;
 use Cache::LRU;
-use IO::File;
 use Mouse;
 
 use Log::Minimal;
@@ -35,153 +31,71 @@ has 'fh_cache' => (
 
 sub _build_fh_cache {
     my $self = shift;
-    Cache::LRU->new( size => 20 );
+    Cache::LRU->new( size => 100 );
 }
 
 __PACKAGE__->meta->make_immutable();
 
-our $OBJECT_HEAD_OFFSET = 8;
-our $STACK_HEAD_OFFSET = 4;
-our $READ_BUFFER = 2*1024*1024;
-
-sub index_db {
+sub lock_index {
     my $self = shift;
-    if ( my $dbs = $self->{_index_db} ) {
-        return $dbs->[0] if $dbs->[1] == $$;
-    }
-    my $path = $self->root . "/index.db";
-    my $db = DBI->connect("dbi:SQLite:dbname=$path",'','',{
-        RaiseError => 1,
-        PrintError => 1,
-        ShowErrorStatement => 1,
-        AutoInactiveDestroy => 1,
-        Callbacks => {
-            connected => sub {
-                my $connect = shift;
-                $connect->do(<<EOF);
-CREATE TABLE IF NOT EXISTS kvs (
-    id BIGINT NOT NULL PRIMARY KEY,
-    bv BLOB NOT NULL
-)
-EOF
-                return;
-            },
-        },
-    });
-    $self->{_index_db} = [$db,$$];
-    $db;
-}
-
-sub stack_db {
-    my $self = shift;
-    my ($index, $rid) = @_;
-
-    my $key = sprintf "stack_db_%010d_%s.db", $index, $rid;
-    if ( my $dbs = $self->fh_cache->get($key) ) {
-        return $dbs->[0] if $dbs->[1] == $$;
-    }
-
-    my $path = $self->root . '/' . $key;
-    my $db = DBI->connect("dbi:SQLite:dbname=$path",'','',{
-        RaiseError => 1,
-        PrintError => 1,
-        ShowErrorStatement => 1,
-        AutoInactiveDestroy => 1,
-        Callbacks => {
-            connected => sub {
-                my $connect = shift;
-                $connect->do(<<EOF);
-CREATE TABLE IF NOT EXISTS kvs (
-    id BIGINT NOT NULL PRIMARY KEY,
-    bv BLOB NOT NULL
-)
-EOF
-                return;
-            },
-        },
-    });
-
-    $self->fh_cache->set($key,[$db,$$]);
-    $db;
-}
-
-sub find_stack_index {
-    my ($self,$id) = @_;
-    my $row = $self->index_db->selectrow_arrayref(
-        'SELECT bv FROM kvs WHERE id =?', {},
-        KyotoCabinet::hash_murmur($id)
-    );
-    return unless $row;
-    $row->[0];
-}
-
-sub find_pos {
-    my $self = shift;
-    my $args = shift;
-
-    my $key = KyotoCabinet::hash_murmur($args->{id});
-
-    my $stack_db = $self->stack_db(
-        $args->{index},
-        $args->{rid}
-    );
-    my $row = $stack_db->selectrow_arrayref(
-        'SELECT bv FROM kvs WHERE id =?', {},
-        $key
-    );
-    return unless $row;
-    my @pos = unpack "QQ",$row->[0];
-    return {
-        offset => $pos[0],
-        size => $pos[1],
-    }
-}
-
-sub put_pos {
-    my $self = shift;
-    state $rule = Data::Validator->new(
-        id => 'Str',
-        index => 'Int',
-        rid => 'Int',
-        offset => 'Int',
-        size => 'Int',
-    );
-    my $args = $rule->validate(@_);
-    my $key = KyotoCabinet::hash_murmur($args->{id});
-    my $packed = pack "QQ",$args->{offset}, $args->{size};
-
-    my $stack_db = $self->stack_db(
-        $args->{index},
-        $args->{rid}
-    );
-    my $sth = $stack_db->prepare_cached(q{INSERT OR REPLACE INTO kvs (id, bv) VALUES ( ?, ?)});
-    $sth->bind_param(1, $key, SQL_INTEGER);
-    $sth->bind_param(2, $packed, SQL_BLOB);
-    $sth->execute;
-    $sth->finish;
-
-    $sth = $self->index_db->prepare_cached(q{INSERT OR REPLACE INTO kvs (id, bv) VALUES ( ?, ?)});
-    $sth->bind_param(1, $key, SQL_INTEGER);
-    $sth->bind_param(2, $args->{index}, SQL_BLOB);
-    $sth->execute;
-    $sth->finish;
-}
-
-sub delete_pos {
-    my ($self,$id) = @_;
-    my $sth = $self->index_db->prepare_cached(q{DELETE FROM kvs WHERE id=?});
-    $sth->bind_param(1, KyotoCabinet::hash_murmur($id), SQL_INTEGER);
-    $sth->execute;
-    $sth->finish;
+    my $id = shift;
+    SoupStack::Storage::LockIndex->new( root => $self->root, id => $id );
 }
 
 sub stack_index {
     my $self = shift;
-    SoupStack::Storage::StackIndex->new( root => $self->root );
+    my ( $index, $rid ) = @_;
+    SoupStack::Storage::StackIndex->new(
+        fh_cache => $self->fh_cache,
+        root => $self->root,
+        index => $index,
+        rid => $rid
+    );
+}
+
+sub find_stack {
+    my ( $self, $id ) = @_;
+
+    my $path = $self->root ."/stack.index";
+    return unless -f $path;
+
+    if ( my $cached = $self->fh_cache->get('stack.index') ) {
+        my @stat = stat $path;
+        if ( $cached->[0] == $stat[10] ) {
+            foreach my $index ( reverse @{$cached->[1]} ) {
+                if ( $id >= $index->[1] ) {
+                    return $index->[0];
+                }
+            }
+        }
+    }
+
+    sysopen( my $fh, $path, O_RDONLY ) or die "Couldnt open lockfile: $!";
+    my @index;
+    my $end = sysseek($fh, 0, SEEK_END);
+    sysseek($fh, 0, SEEK_SET);
+    for ( my $index=1; $index <= $end / 31; $index++ ) {
+        my $rlen = sysread( $fh, my $buf, 31 );
+        die "unexpected eof while reading index: $!" if $rlen != 31;
+        my $index = int(substr($buf, 0, 10));
+        my $head_id = int(substr($buf, 10, 20));
+        push @index, [$index,$head_id];
+    }
+
+    $self->fh_cache->set('stack.index', \@index);
+
+    foreach my $index ( reverse @index ) {
+        if ( $id >= $index->[1] ) {
+            return $index->[0];
+        }
+    }
+
+    return;
 }
 
 sub open_stack {
-    my ($self,$index, $create) = @_;
+    my ($self,$index, $create_with_id, $without_setcache) = @_;
+
     my $key = sprintf "stack_%010d", $index;
     my $path = $self->root . '/' . $key;
     my $cached = $self->fh_cache->get($key);
@@ -192,76 +106,59 @@ sub open_stack {
 
     my $fh;
     my $rid;
-    if ( $create ) {
-        sysopen( $fh, $path, O_RDWR|O_CREAT|O_EXCL ) or die $!;
+    my $head_id;
+    if ( $create_with_id ) {
+        sysopen( $fh, $path, O_RDWR|O_CREAT ) or die $!;
         $rid = time;
-        syswrite($fh, pack('L',$rid), $STACK_HEAD_OFFSET) or die $!;
+        syswrite($fh, pack('L',$rid), 4) or die $!; #time
+        $head_id = $create_with_id;
     }
     else {
         sysopen( $fh, $path, O_RDWR ) or die $!;
-        sysread( $fh, $rid, $STACK_HEAD_OFFSET) // die $!;
-        $rid = unpack('L',$rid);
+        sysread( $fh, my $buf, 12) // die $!; #time+first object id
+        ($rid,$head_id) = unpack('LQ>',$buf);
     }
 
     my @stat = stat $path;
-    my $stack = { rid => $rid, fh => $fh, ctime => $stat[10] };
-    $self->fh_cache->set( $key, $stack);
+    my $stack = { rid => $rid, fh => $fh, ctime => $stat[10], head_id => $head_id  };
+    $self->fh_cache->set( $key, $stack) if !$without_setcache;
     $stack;
 }
 
 sub get {
     my ($self,$id) = @_;
 
-    my $index = $self->find_stack_index($id);
+    my $index = $self->find_stack($id);
     return unless $index;
-
     my $stack = $self->open_stack($index);
-
-    my $pos = $self->find_pos({
-        id => $id,
-        index => $index,
-        rid => $stack->{rid},
-   });
+    my $pos = $self->stack_index(
+        $index,
+        $stack->{rid}
+    )->search($id);
     return unless $pos;
 
-    sysseek( $stack->{fh}, $pos->{offset} + $OBJECT_HEAD_OFFSET,  SEEK_SET ) or die $!;
-    my $size = $pos->{size};
-    
-    my $buffer='';
-    my $perlbuf = ( $size <= $READ_BUFFER ) ? 1 : 0;
-    if (!$perlbuf) {
-        $buffer = IO::File->new_tmpfile;
-        $buffer->binmode;
-    }
-    while ( $size ) {
-        my $len = ( $size > $READ_BUFFER ) ? $READ_BUFFER : $size;
-        my $readed = sysread( $stack->{fh}, my $read, $len);
-        die $! if ! defined $readed;
-        $size = $size - $readed;
-        if ( $perlbuf ) {
-            $buffer .= $read;
-        }
-        else {
-            print $buffer $read;
-        }
-    }
+    return if $pos->{deleted};
+    sysseek( $stack->{fh}, $pos->{offset},  SEEK_SET ) or die $!;
+    my $rlen = sysread( $stack->{fh}, my $buf, 16 );
+    die "unexpected eof while reading object: $!" if $rlen != 16;
+    my ($object_id, $size) = unpack('Q>Q>', $buf);
+    die "unexpected object_id" if $object_id != $id;
 
-    my $buf;
-    if ( $perlbuf ) {
-        open( $buf, '<', \$buffer);
-        bless $buf, 'FileHandle';        
-    }
-    else {
-        $buf = $buffer;
-    }
-
-    seek($buf,0,0);
-    $buf;
+    return SoupStack::Storage::RangeFile->new(
+        $stack->{fh}, 
+        $size
+    );
 }
 
 sub delete {
     my ($self,$id) = @_;
-    $self->delete_pos($id);
+    my $index = $self->find_stack($id);
+    return unless $index;
+    my $stack = $self->open_stack($index);
+    $self->stack_index(
+        $index,
+        $stack->{rid}
+    )->delete($id);
     return 1;
 }
 
@@ -273,31 +170,27 @@ sub put {
     sysseek($fh, 0, SEEK_SET );
 
     die 'cannot store size > max_file_size' 
-        if $size + $OBJECT_HEAD_OFFSET >= $self->max_file_size;
+        if $size + 16 >= $self->max_file_size;
 
-    my $stack_index = $self->stack_index; #with lock
-    my $index = $stack_index->id;
-    my $create =  ( $index == 0 ) ? do { $index = $stack_index->incr; 1 } : 0;
-    my $stack = $self->open_stack($index, $create);
+    my $lock_index = $self->lock_index($id); #with lock
+    my $index = $lock_index->latest_id;
+    my $stack = $self->open_stack($index, $id);
 
     my $offset = sysseek( $stack->{fh}, 0, SEEK_END ) // die $!;
     $offset += 0;
+
     if ( $offset + $size > $self->max_file_size ) {
         $offset = 0;
-        $index = $stack_index->incr;
-        $stack = $self->open_stack($index,1);
+        $index = $lock_index->incr();
+        $stack = $self->open_stack($index,$id);
     }
-    my $len = syswrite($stack->{fh}, pack('q',KyotoCabinet::hash_murmur($id)), $OBJECT_HEAD_OFFSET) or die $!;
-    die "couldnt write object header" if $len < 8;
+
+    my $len = syswrite($stack->{fh}, pack('Q>Q>',$id,$size), 16) or die $!;
+    die "couldnt write object header" if $len < 16;
     copy( $fh, $stack->{fh} ) or die $!;
 
-    $self->put_pos({
-        id => $id,
-        index => $index,
-        rid => $stack->{rid},
-        offset => $offset,
-        size => $size,
-    });
+    my $stack_index = $self->stack_index($index,$stack->{rid});
+    $stack_index->add($id, $offset);
     1;
 }
 
@@ -309,49 +202,233 @@ use strict;
 use warnings;
 use Mouse;
 use Fcntl qw/:DEFAULT :flock :seek/;
-use Time::HiRes;
+use File::Copy;
+
 has 'root' => (
     is => 'ro',
     isa => 'Str',
     required => 1,
 );
 
+has 'index' => (
+    is => 'ro',
+    isa => 'Int',
+    required => 1,
+);
+
+has 'rid' => (
+    is => 'ro',
+    isa => 'Int',
+    required => 1,
+);
+
+has 'fh_cache' => (
+    is => 'ro',
+    isa => 'Cache::LRU',
+    required => 1,
+);
+
 sub BUILD {
     my $self = shift;
-    my $path = $self->root ."/stack.index";
+    my $key = sprintf "stack_%010d_%s.index", $self->index, $self->rid;
+    my $path = $self->root . '/' . $key;
+
+    if ( my $fh = $self->fh_cache->get($key) ) {
+        $self->{fh} = $fh;
+        return;
+    }
+
+    sysopen( my $fh, $path, O_RDWR|O_CREAT|O_EXCL ) or die $!;
+    binmode($fh);
+    $self->fh_cache->set( $key, $fh);
+    $self->{fh} = $fh;
+}
+
+sub add {
+    my $self = shift;
+    my ($id, $offset) = @_;
+    my $fh = $self->{fh};
+    my $end = sysseek($fh, 0, SEEK_END);
+    if ( $end > 0 ) {
+        sysseek($fh, $end - 17, SEEK_SET);
+        sysread($fh, my $buf, 8);
+        my $last_id = unpack('Q>', $buf);
+        die "id order [$id], current id is $last_id" if $last_id >= $id;
+        sysseek($fh, 0, SEEK_END);
+    }
+    syswrite($fh, pack('Q>Q>a',$id,$offset,0), 17);
+}
+
+sub binsearch {
+    my ($find, $fh, $cur, $end, $pfind) = @_;
+    return if $end - $cur < 17;
+    $pfind ||= pack('Q>',$find);
+    if ( $end - $cur <= 1024) {
+        my $end_pos = $end - $cur;
+        $end_pos = $end_pos - $end_pos % 17 if ( $end_pos % 17 != 0);
+        sysseek( $fh, $cur, SEEK_SET);
+        my $readed = sysread( $fh, my $buf, $end_pos);
+        for ( my $i=0; $i<$readed; $i+=17 ) {
+            if ( $pfind eq substr($buf, $i, 8) ) {
+                return [unpack('Q>Q>a',substr($buf, $i, 17)),$cur+$i];
+            }
+        }
+        return;
+    }
+    my $pos = ($cur + $end ) / 2;
+    $pos = $pos + $pos % 17 if ($pos % 17 != 0);
+    sysseek( $fh, $pos, SEEK_SET);
+    my $readed = sysread( $fh, my $id, 8);
+    if ( $pfind eq $id ) {
+        sysread( $fh, my $offset, 9);
+        return [unpack('Q>Q>a',$id.$offset),$pos];
+    }
+    elsif ( $pfind gt $id ) {
+        binsearch( $find, $fh, $pos, $end, $pfind);
+    }
+    elsif ( $pfind le $id ) {
+        binsearch( $find, $fh, $cur, $pos, $pfind);
+    }
+}
+
+sub search {
+    my $self = shift;
+    my $id = shift;
+    sysseek($self->{fh}, 0, SEEK_SET );
+    my $end = sysseek($self->{fh}, 0, SEEK_END );
+    my $ret = binsearch($id, $self->{fh}, 0, $end);
+    return unless $ret;
+    return {
+        id => $id,
+        offset => $ret->[1],
+        deleted => $ret->[2],
+        pos => $ret->[3],
+    }
+}
+
+sub delete {
+    my $self = shift;
+    my $id = shift;
+    my $search = $self->search($id);
+    return unless $search;
+    sysseek($self->{fh}, $search->{pos}, SEEK_SET);
+    syswrite($self->{fh}, pack('Q>Q>a',$search->{id},$search->{offset},1), 17);
+}
+
+1;
+
+package SoupStack::Storage::LockIndex;
+
+use strict;
+use warnings;
+use Mouse;
+use Fcntl qw/:DEFAULT :flock :seek/;
+use File::Copy;
+
+has 'root' => (
+    is => 'ro',
+    isa => 'Str',
+    required => 1,
+);
+
+has 'id' => (
+    is => 'ro',
+    isa => 'Int',
+    required => 1,
+);
+
+
+sub BUILD {
+    my $self = shift;
+    my $path = $self->root ."/.stack.index";
     sysopen( my $fh, $path, O_RDWR|O_CREAT ) or die "Couldnt open lockfile: $!";
     flock( $fh, LOCK_EX ) or die "Couldnt get lock: $!";
     $self->{_fh} = $fh;
 
-    sysread( $fh, my $id, 32) // die $!;
-
-    if ( !$id ) {
-        $id = 0;
-        sysseek( $self->{_fh}, 0, SEEK_SET) or die $!;
-        syswrite( $self->{_fh}, $id, length($id) ) or die $!;
+    my $end = sysseek($fh, 0, SEEK_END);
+    if ( $end == 0 ) {
+        sysseek( $fh, 0, SEEK_END) or die $!;
+        syswrite( $fh, sprintf("%10d%20d\n",1,$self->id), 31 ) or die $!;
+        $self->{modify} = 1;
+        $end = 31;
     }
-
-    $self->{_id} = $id;
+    $self->{latest_id} = $end /31;
 }
 
-sub id {
-    shift->{_id};
+sub latest_id {
+    shift->{latest_id};
 }
 
 sub incr {
     my $self = shift;
-    $self->{_id}++;
-    sysseek( $self->{_fh}, 0, SEEK_SET) or die $!;
-    syswrite( $self->{_fh}, $self->{_id}, length($self->{_id}) ) or die $!;
-    return $self->{_id};
+    my $last_id = $self->latest_id;
+    $last_id++;
+    sysseek( $self->{_fh}, 0, SEEK_END) or die $!;
+    syswrite( $self->{_fh}, sprintf("%10d%20d\n",$last_id,$self->id), 31 ) or die $!;
+    $self->{modify} = 1;
+    return $last_id;
 }
 
 sub DEMOLISH {
     my $self = shift;
     return if !$self->{_fh};
     flock( $self->{_fh}, LOCK_UN ) or die "unlockerror: $!";
+    copy($self->root ."/.stack.index", $self->root . "/stack.index") if $self->{modify};
 }
 
 __PACKAGE__->meta->make_immutable();
 1;
+
+package SoupStack::Storage::RangeFile;
+
+use strict;
+use warnings;
+use 5.10.0;
+use Fcntl qw/:seek/;
+
+sub new {
+    my ($class, $fh, $count, $offset) = @_;
+    my $self = bless {
+        fh => $fh,
+        _count => $count,
+        _offset => $offset,
+    }, $class;
+
+    if ( ! defined $offset ) {
+        seek( $fh, 0, SEEK_CUR) or die $!;
+        my $cur = tell($fh);
+        die $! if $cur < 0;
+        $self->{_offset} = $cur;
+    }
+    if ( ! $count ) {
+        seek( $fh, 0, SEEK_END) or die $!;
+        my $end = tell($fh);
+        die $! if $end < -1;
+        $self->{_count} = $end - $offset;
+    }
+    seek( $fh, $self->{_offset}, SEEK_SET) or die $!;
+
+    $self;
+}
+
+sub getline {
+    my $self = shift;
+    return if defined $self->{_read} && $self->{_read} >= $self->{_count};
+    $self->{_read} = 0 if ! exists $self->{_read};
+
+    my $len = ref $/ ? ${$/} : 65536;
+    $len = $self->{_count} - $self->{_read} if $len > $self->{_count} - $self->{_read};
+    my $read = read( $self->{fh}, my $buf, $len);
+    die $! if ! defined $read;
+
+    $self->{_read} += $read;
+    $self->{_offset} = $self->{_offset} + $self->{_read};
+    return $buf;
+}
+
+
+sub close { 1 };
+
+1;
+
 

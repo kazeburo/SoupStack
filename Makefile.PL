@@ -8,11 +8,8 @@ requires 'Router::Simple';
 requires 'HTTP::Exception';
 requires 'Try::Tiny';
 requires 'Mouse';
-requires 'KyotoCabinet';
-requires 'Data::Validator';
 requires 'File::Copy';
 requires 'Cache::LRU';
-requires 'IO::File';
 
 tests 't/*.t t/*/*.t';
 #author_tests 'xt';
