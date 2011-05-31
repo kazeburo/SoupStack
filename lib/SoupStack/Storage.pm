@@ -45,12 +45,17 @@ sub lock_index {
 sub stack_index {
     my $self = shift;
     my ( $index, $rid ) = @_;
-    SoupStack::Storage::StackIndex->new(
-        fh_cache => $self->fh_cache,
+    my $key = sprintf "stack_%010d_%s", $index, $rid; 
+    if ( my $cached = $self->fh_cache->get($key) ) {
+        return $cached;
+    }
+    my $stack_index = SoupStack::Storage::StackIndex->new(
         root => $self->root,
         index => $index,
         rid => $rid
     );
+    $self->fh_cache->set($key, $stack_index);
+    $stack_index;
 }
 
 sub find_stack {
@@ -201,9 +206,9 @@ package SoupStack::Storage::StackIndex;
 
 use strict;
 use warnings;
-use Mouse;
 use Fcntl qw/:DEFAULT :flock :seek/;
 use File::Copy;
+use Mouse;
 
 has 'root' => (
     is => 'ro',
@@ -223,25 +228,14 @@ has 'rid' => (
     required => 1,
 );
 
-has 'fh_cache' => (
-    is => 'ro',
-    isa => 'Cache::LRU',
-    required => 1,
-);
+__PACKAGE__->meta->make_immutable();
 
 sub BUILD {
     my $self = shift;
     my $key = sprintf "stack_%010d_%s.index", $self->index, $self->rid;
     my $path = $self->root . '/' . $key;
-
-    if ( my $fh = $self->fh_cache->get($key) ) {
-        $self->{fh} = $fh;
-        return;
-    }
-
     sysopen( my $fh, $path, O_RDWR|O_CREAT|O_EXCL ) or die $!;
     binmode($fh);
-    $self->fh_cache->set( $key, $fh);
     $self->{fh} = $fh;
 }
 
