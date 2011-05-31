@@ -82,7 +82,8 @@ sub find_stack {
         push @index, [$index,$head_id];
     }
 
-    $self->fh_cache->set('stack.index', \@index);
+    my @stat = stat $path;
+    $self->fh_cache->set('stack.index', [$stat[10],\@index]);
 
     foreach my $index ( reverse @index ) {
         if ( $id >= $index->[1] ) {
@@ -263,7 +264,7 @@ sub binsearch {
     my ($find, $fh, $cur, $end, $pfind) = @_;
     return if $end - $cur < 17;
     $pfind ||= pack('Q>',$find);
-    if ( $end - $cur <= 1024) {
+    if ( 0 && $end - $cur <= 1024) {
         my $end_pos = $end - $cur;
         $end_pos = $end_pos - $end_pos % 17 if ( $end_pos % 17 != 0);
         sysseek( $fh, $cur, SEEK_SET);
@@ -275,8 +276,8 @@ sub binsearch {
         }
         return;
     }
-    my $pos = ($cur + $end ) / 2;
-    $pos = $pos + $pos % 17 if ($pos % 17 != 0);
+    my $pos = int(($cur + $end ) / 2);
+    $pos = $pos - $pos % 17 if ($pos % 17 != 0);
     sysseek( $fh, $pos, SEEK_SET);
     my $readed = sysread( $fh, my $id, 8);
     if ( $pfind eq $id ) {
