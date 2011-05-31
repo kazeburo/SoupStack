@@ -264,7 +264,7 @@ sub binsearch {
     my ($find, $fh, $cur, $end, $pfind) = @_;
     return if $end - $cur < 17;
     $pfind ||= pack('Q>',$find);
-    if ( 0 && $end - $cur <= 1024) {
+    if ( $end - $cur <= 1024) {
         my $end_pos = $end - $cur;
         $end_pos = $end_pos - $end_pos % 17 if ( $end_pos % 17 != 0);
         sysseek( $fh, $cur, SEEK_SET);
