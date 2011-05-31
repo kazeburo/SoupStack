@@ -208,35 +208,18 @@ use strict;
 use warnings;
 use Fcntl qw/:DEFAULT :flock :seek/;
 use File::Copy;
-use Mouse;
 
-has 'root' => (
-    is => 'ro',
-    isa => 'Str',
-    required => 1,
-);
+sub new {
+    my $class = shift;
+    my %args = ref $_[0] ? %{$_[0]} : @_;
+    my $self = bless \%args, $class;
 
-has 'index' => (
-    is => 'ro',
-    isa => 'Int',
-    required => 1,
-);
-
-has 'rid' => (
-    is => 'ro',
-    isa => 'Int',
-    required => 1,
-);
-
-__PACKAGE__->meta->make_immutable();
-
-sub BUILD {
-    my $self = shift;
-    my $key = sprintf "stack_%010d_%s.index", $self->index, $self->rid;
-    my $path = $self->root . '/' . $key;
+    my $key = sprintf "stack_%010d_%s.index", $self->{index}, $self->{rid};
+    my $path = $self->{root} . '/' . $key;
     sysopen( my $fh, $path, O_RDWR|O_CREAT|O_EXCL ) or die $!;
     binmode($fh);
     $self->{fh} = $fh;
+    $self;
 }
 
 sub add {
@@ -316,26 +299,15 @@ package SoupStack::Storage::LockIndex;
 
 use strict;
 use warnings;
-use Mouse;
 use Fcntl qw/:DEFAULT :flock :seek/;
 use File::Copy;
 
-has 'root' => (
-    is => 'ro',
-    isa => 'Str',
-    required => 1,
-);
+sub new {
+    my $class = shift;
+    my %args = ref $_[0] ? %{$_[0]} : @_;
+    my $self = bless \%args, $class;
 
-has 'id' => (
-    is => 'ro',
-    isa => 'Int',
-    required => 1,
-);
-
-
-sub BUILD {
-    my $self = shift;
-    my $path = $self->root ."/.stack.index";
+    my $path = $self->{root} ."/.stack.index";
     sysopen( my $fh, $path, O_RDWR|O_CREAT ) or die "Couldnt open lockfile: $!";
     flock( $fh, LOCK_EX ) or die "Couldnt get lock: $!";
     $self->{_fh} = $fh;
@@ -343,11 +315,13 @@ sub BUILD {
     my $end = sysseek($fh, 0, SEEK_END);
     if ( $end == 0 ) {
         sysseek( $fh, 0, SEEK_END) or die $!;
-        syswrite( $fh, sprintf("%10d%20d\n",1,$self->id), 31 ) or die $!;
+        syswrite( $fh, sprintf("%10d%20d\n",1,$self->{id}), 31 ) or die $!;
         $self->{modify} = 1;
         $end = 31;
     }
     $self->{latest_id} = $end /31;
+
+    return $self;
 }
 
 sub latest_id {
@@ -359,19 +333,18 @@ sub incr {
     my $last_id = $self->latest_id;
     $last_id++;
     sysseek( $self->{_fh}, 0, SEEK_END) or die $!;
-    syswrite( $self->{_fh}, sprintf("%10d%20d\n",$last_id,$self->id), 31 ) or die $!;
+    syswrite( $self->{_fh}, sprintf("%10d%20d\n",$last_id,$self->{id}), 31 ) or die $!;
     $self->{modify} = 1;
     return $last_id;
 }
 
-sub DEMOLISH {
+sub DESTROY {
     my $self = shift;
     return if !$self->{_fh};
     flock( $self->{_fh}, LOCK_UN ) or die "unlockerror: $!";
-    copy($self->root ."/.stack.index", $self->root . "/stack.index") if $self->{modify};
+    copy($self->{root} ."/.stack.index", $self->{root} . "/stack.index") if $self->{modify};
 }
 
-__PACKAGE__->meta->make_immutable();
 1;
 
 package SoupStack::Storage::RangeFile;
