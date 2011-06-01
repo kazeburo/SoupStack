@@ -153,7 +153,7 @@ sub get {
     return SoupStack::Storage::RangeFile->new(
         $stack->{fh}, 
         $size,
-        $pos->{offset},
+        $pos->{offset}+16,
     );
 }
 
@@ -210,6 +210,7 @@ use strict;
 use warnings;
 use Fcntl qw/:DEFAULT :flock :seek/;
 use File::Copy;
+use Sys::Mmap;
 
 sub new {
     my $class = shift;
@@ -296,7 +297,12 @@ sub search {
     my $id = shift;
     sysseek($self->{fh}, 0, SEEK_SET );
     my $end = sysseek($self->{fh}, 0, SEEK_END );
-    my $ret = binsearch($id, $self->{fh}, 0, $end);
+    return unless $end;
+    if ( !$self->{mmap} || ( $self->{mmap} && length ${$self->{mmap}} != $end ) ) {
+        mmap( my $mbuf, 0, PROT_READ, MAP_SHARED, $self->{fh}) or die "mmap: $!";
+        $self->{mmap} = \$mbuf;
+    }
+    my $ret = membinsearch(pack('Q>',$id), $self->{mmap}, 0, $end);
     return unless $ret;
     return {
         id => $ret->[0],
