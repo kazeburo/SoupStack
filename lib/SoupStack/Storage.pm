@@ -113,7 +113,7 @@ sub open_stack {
     my $fh;
     my $rid;
     my $head_id;
-    if ( $create_with_id ) {
+    if ( $create_with_id && ! -f $path ) {
         sysopen( $fh, $path, O_RDWR|O_CREAT ) or die $!;
         $rid = time;
         syswrite($fh, pack('L',$rid), 4) or die $!; #time
