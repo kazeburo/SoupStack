@@ -31,7 +31,7 @@ has 'fh_cache' => (
 
 sub _build_fh_cache {
     my $self = shift;
-    Cache::LRU->new( size => 100 );
+    Cache::LRU->new( size => 20 );
 }
 
 __PACKAGE__->meta->make_immutable();
@@ -39,7 +39,7 @@ __PACKAGE__->meta->make_immutable();
 sub lock_index {
     my $self = shift;
     my $id = shift;
-    SoupStack::Storage::LockIndex->new( root => $self->root, id => $id );
+    SoupStack::Storage::LockIndex->new( root => $self->root, id => $id, fh_cache => $self->fh_cache );
 }
 
 sub stack_index {
@@ -148,7 +148,7 @@ sub get {
     my $rlen = sysread( $stack->{fh}, my $buf, 16 );
     die "unexpected eof while reading object: $!" if $rlen != 16;
     my ($object_id, $size) = unpack('Q>Q>', $buf);
-    die "unexpected object_id" if $object_id != $id;
+    die "unexpected object_id, $id, $object_id, $pos->{id}, $pos->{offset}" if $object_id != $id;
 
     return SoupStack::Storage::RangeFile->new(
         $stack->{fh}, 
@@ -186,9 +186,10 @@ sub put {
     $offset += 0;
 
     if ( $offset + $size > $self->max_file_size ) {
-        $offset = 0;
         $index = $lock_index->incr();
         $stack = $self->open_stack($index,$id);
+        $offset = sysseek( $stack->{fh}, 0, SEEK_END ) // die $!;
+        $offset += 0;
     }
 
     my $len = syswrite($stack->{fh}, pack('Q>Q>',$id,$size), 16) or die $!;
@@ -234,31 +235,51 @@ sub add {
         die "id order [$id], current id is $last_id" if $last_id >= $id;
         sysseek($fh, 0, SEEK_END);
     }
-    syswrite($fh, pack('Q>Q>a',$id,$offset,0), 17);
+    my $write = syswrite($fh, pack('Q>Q>a',$id,$offset,0), 17);
+    die "index write error: $!" if $write < 17;
+}
+
+sub membinsearch {
+    my ($find, $buf, $cur, $end ) = @_;
+    return if $end - $cur < 17;
+    my $pos = int(($cur + $end ) / 2);
+    $pos = $pos - $pos % 17;
+    my $id = substr($$buf, $pos, 8);
+    if ( $find eq $id ) {
+        return [unpack('Q>Q>a',substr($$buf, $pos, 17)), $pos];
+    }
+    elsif ( $find gt $id ) {
+        membinsearch( $find, $buf, $pos, $end);
+    }
+    elsif ( $find le $id ) {
+        membinsearch( $find, $buf, $cur, $pos);
+    }    
 }
 
 sub binsearch {
     my ($find, $fh, $cur, $end, $pfind) = @_;
     return if $end - $cur < 17;
     $pfind ||= pack('Q>',$find);
-    if ( $end - $cur <= 1024) {
+    if ( $end - $cur <= 16384) {
         my $end_pos = $end - $cur;
-        $end_pos = $end_pos - $end_pos % 17 if ( $end_pos % 17 != 0);
+        $end_pos = $end_pos - $end_pos % 17;
         sysseek( $fh, $cur, SEEK_SET);
         my $readed = sysread( $fh, my $buf, $end_pos);
-        for ( my $i=0; $i<$readed; $i+=17 ) {
-            if ( $pfind eq substr($buf, $i, 8) ) {
-                return [unpack('Q>Q>a',substr($buf, $i, 17)),$cur+$i];
-            }
+        die "unexpected eof while reading index: $!" if $readed != $end_pos;
+        my $ret =  membinsearch($pfind, \$buf, 0, $end_pos);
+        if ( $ret ) {
+            return [$ret->[0],$ret->[1],$ret->[2],$ret->[3]+$cur];
         }
         return;
     }
     my $pos = int(($cur + $end ) / 2);
-    $pos = $pos - $pos % 17 if ($pos % 17 != 0);
+    $pos = $pos - $pos % 17;
     sysseek( $fh, $pos, SEEK_SET);
     my $readed = sysread( $fh, my $id, 8);
+    die "unexpected eof with reading index: $!" if $readed < 8;
     if ( $pfind eq $id ) {
-        sysread( $fh, my $offset, 9);
+        my $readed = sysread( $fh, my $offset, 9);
+        die "unexpected eof with reading index: $!" if $readed < 9;
         return [unpack('Q>Q>a',$id.$offset),$pos];
     }
     elsif ( $pfind gt $id ) {
@@ -277,7 +298,7 @@ sub search {
     my $ret = binsearch($id, $self->{fh}, 0, $end);
     return unless $ret;
     return {
-        id => $id,
+        id => $ret->[0],
         offset => $ret->[1],
         deleted => $ret->[2],
         pos => $ret->[3],
@@ -308,7 +329,12 @@ sub new {
     my $self = bless \%args, $class;
 
     my $path = $self->{root} ."/.stack.index";
-    sysopen( my $fh, $path, O_RDWR|O_CREAT ) or die "Couldnt open lockfile: $!";
+    my $fh;
+    if ( !( $fh = $self->{fh_cache}->get('.stack.index')) ) {
+        sysopen( $fh, $path, O_RDWR|O_CREAT ) or die "Couldnt open lockfile: $!";
+        $self->{fh_cache}->set('.stack.index',$fh);
+    }
+
     flock( $fh, LOCK_EX ) or die "Couldnt get lock: $!";
     $self->{_fh} = $fh;
 

@@ -11,6 +11,7 @@ my $file = do { local $/; <$fh> };
 seek($fh, 0, 0);
 warn length($file);
 
+=pod
 my $dir0 = tempdir( CLEANUP => 1 );
 my $storage = SoupStack::Storage->new({
     root => $dir0,
@@ -32,16 +33,24 @@ timethese(5,{
         }
     }
 });
+=cut
 
 my $dir = tempdir( CLEANUP => 1 );
 my $storage = SoupStack::Storage->new({
     root => $dir,
     max_file_size => 10_000_000,
 });
-for my $id (1..2_000 ) {
+for my $id (1..20_000 ) {
     $storage->put($id, $fh);
 }
 
+for my $id (1..20_000 ) {
+    $storage->get(int(rand(20_000))+1);
+}
+
+
+
+=pod
 for my $id (1..2_000 ) {
     copy( $fh, "$dir/$id");
     seek($fh, 0, 0);
@@ -60,6 +69,6 @@ timethese(8,{
         }
     }
 });
-
+=cut
 
 
