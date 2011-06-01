@@ -4,8 +4,7 @@ use SoupStack::Storage;
 use File::Temp qw/tempdir/;
 use List::Util qw/shuffle/;
 
-my $dir = tempdir( CLEANUP => 0 );
-warn $dir;
+my $dir = tempdir( CLEANUP => 1 );
 my $storage = SoupStack::Storage->new({
     root => $dir,
     max_file_size => 1_000_000,
@@ -15,7 +14,7 @@ ok($storage);
 open(my $fh, __FILE__);
 my $file = do { local $/; <$fh> };
 
-for my $id (1..20){    
+for my $id (1..5){    
     ok($storage->put($id, $fh));
     my $fh1 = $storage->get($id);
     ok($fh1);
@@ -23,18 +22,19 @@ for my $id (1..20){
     is($file1, $file);
 }
 
-for my $id (shuffle 1..10){
+for my $id (shuffle 1..5){
     my $fh1 = $storage->get($id);
     ok($fh1);
 }
 
-for my $id (1..10) {
+for my $id (1..5) {
     ok($storage->delete($id));
     my $fh1 = $storage->get($id);
     ok(!$fh1)
 }
 
 done_testing;
+
 
 
 

@@ -4,7 +4,6 @@ use strict;
 use warnings;
 use 5.10.0;
 use Fcntl qw/:DEFAULT :flock :seek/;
-use File::Copy;
 use Cache::LRU;
 use Mouse;
 
@@ -65,7 +64,7 @@ sub find_stack {
     return unless -f $path;
 
     if ( my $cached = $self->fh_cache->get('stack.index') ) {
-        my @stat = stat $path;
+        my @stat = stat _; #path
         if ( $cached->[0] == $stat[10] ) {
             foreach my $index ( reverse @{$cached->[1]} ) {
                 if ( $id >= $index->[1] ) {
@@ -195,7 +194,15 @@ sub put {
 
     my $len = syswrite($stack->{fh}, pack('Q>Q>',$id,$size), 16) or die $!;
     die "couldnt write object header" if $len < 16;
-    copy( $fh, $stack->{fh}, 65536 ) or die $!;
+
+    for (;;) {
+        my ($readed, $wrote, $pwrote);
+        defined($readed = sysread($fh, my $buf, 65536)) or die "unexpected eof: $!";
+        last unless $readed;
+        for ($wrote = 0; $wrote < $readed; $wrote += $pwrote) {
+            $pwrote = syswrite($stack->{fh}, $buf, $readed - $wrote, $wrote) or die "cannot write to stack: $!";
+        }
+    }
 
     my $stack_index = $self->stack_index($index,$stack->{rid});
     $stack_index->add($id, $offset);
@@ -209,7 +216,6 @@ package SoupStack::Storage::StackIndex;
 use strict;
 use warnings;
 use Fcntl qw/:DEFAULT :flock :seek/;
-use File::Copy;
 use Sys::Mmap;
 
 sub new {
