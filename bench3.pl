@@ -6,7 +6,7 @@ use File::Copy;
 use Benchmark qw/timethese/;
 use List::Util qw/shuffle/;
 
-open(my $fh,"output");
+open(my $fh, 'output');
 
 my $dir = tempdir( CLEANUP => 1 );
 my $storage = SoupStack::Storage->new({
@@ -14,19 +14,13 @@ my $storage = SoupStack::Storage->new({
     max_file_size => 10_000_000,
 });
 
-my $i=1;
-timethese(20_000,{
-    write => sub {
-        $storage->put($i, $fh);
-        $i++;
-    }
-});
+for(1..5000) {
+    $storage->put($_, $fh);
+}
 
-$i=1;
-timethese(20_000,{
-    read => sub {
-        $storage->get($i);
-        $i++;
-    }
-});
+for(1..5000) {
+    $storage->get($_);
+}
+
+
 

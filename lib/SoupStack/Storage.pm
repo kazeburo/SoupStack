@@ -152,7 +152,8 @@ sub get {
 
     return SoupStack::Storage::RangeFile->new(
         $stack->{fh}, 
-        $size
+        $size,
+        $pos->{offset},
     );
 }
 
@@ -194,7 +195,7 @@ sub put {
 
     my $len = syswrite($stack->{fh}, pack('Q>Q>',$id,$size), 16) or die $!;
     die "couldnt write object header" if $len < 16;
-    copy( $fh, $stack->{fh} ) or die $!;
+    copy( $fh, $stack->{fh}, 65536 ) or die $!;
 
     my $stack_index = $self->stack_index($index,$stack->{rid});
     $stack_index->add($id, $offset);
@@ -217,7 +218,7 @@ sub new {
 
     my $key = sprintf "stack_%010d_%s.index", $self->{index}, $self->{rid};
     my $path = $self->{root} . '/' . $key;
-    sysopen( my $fh, $path, O_RDWR|O_CREAT|O_EXCL ) or die $!;
+    sysopen( my $fh, $path, O_RDWR|O_CREAT ) or die $!;
     binmode($fh);
     $self->{fh} = $fh;
     $self;
