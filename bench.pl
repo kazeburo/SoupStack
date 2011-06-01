@@ -25,7 +25,8 @@ timethese($try,{
     },
     write_fileio => sub {
         $k++;
-        copy( $fh, "$dir/$k",65536);
+        seek($fh,0,0);
+        copy( $fh, "$dir/$k", 65536 );
     },
 });
 
@@ -35,6 +36,7 @@ timethese($try,{
     },
     read_fileio => sub {
         open(my $fh1, "$dir/".int(rand($try)) );
-        my $result = do { local $/; <$fh1> };
+        binmode($fh1);
+        read($fh1, my $buf, 16);
     },
 });

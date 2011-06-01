@@ -9,9 +9,10 @@ use List::Util qw/shuffle/;
 open(my $fh,"output");
 
 my $dir = tempdir( CLEANUP => 1 );
+warn $dir;
 my $storage = SoupStack::Storage->new({
     root => $dir,
-    max_file_size => 10_000_000,
+    max_file_size => 1_000_000_000,
 });
 
 my $i=1;
