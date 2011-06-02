@@ -71,31 +71,29 @@ sub build_app {
     #router
     my $router = Router::Simple->new;
     $router->connect(
-        '/{id:[a-zA-Z0-9/_\-%]+}',
+        '/{id:[0-9]+}',
         { action => 'get_object' },
         { method => ['GET','HEAD'] }
     );
     $router->connect(
-        '/{id:[a-zA-Z0-9/_\-%]+}',
+        '/{id:[0-9]+}',
         { action => 'put_object' },
         { method => ['PUT'] }
     );
     $router->connect(
-        '/{id:[a-zA-Z0-9/_\-%]+}',
+        '/{id:[0-9]+}',
         { action => 'delete_object' },
         { method => ['DELETE'] }
     );
 
     sub {
         my $env = shift;
-
         my $c = SoupStack::Connection->new({
             req => Plack::Request->new($env),
             res => Plack::Response->new(200),
             stash => {},
         });
         my $p = try {
-            local $env->{PATH_INFO} = Encode::decode_utf8( $env->{PATH_INFO}, 1 );
             $router->match($env)
         }
         catch {
@@ -104,6 +102,9 @@ sub build_app {
 
         my $response;
         if ( $p ) {
+            my $id = $p->{id};
+            HTTP::Exception->throw(400, "ID:$id isnot Numeric Value") if $id ne int($id);
+
             my $action = delete $p->{action};
             my $code = $self->can($action);
             HTTP::Exception->throw(500, 'Action not Found') unless $code;
