@@ -23,11 +23,9 @@ timethese(20_000,{
     }
 });
 
-$i=1;
 timethese(20_000,{
     read => sub {
-        $storage->get($i);
-        $i++;
+        $storage->get(int(rand(20_000)+1));
     }
 });
 
