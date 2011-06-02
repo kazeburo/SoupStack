@@ -216,7 +216,6 @@ package SoupStack::Storage::StackIndex;
 use strict;
 use warnings;
 use Fcntl qw/:DEFAULT :flock :seek/;
-use Sys::Mmap;
 
 sub new {
     my $class = shift;
@@ -265,16 +264,15 @@ sub membinsearch {
 }
 
 sub binsearch {
-    my ($find, $fh, $cur, $end, $pfind) = @_;
+    my ($find, $fh, $cur, $end) = @_;
     return if $end - $cur < 17;
-    $pfind ||= pack('Q>',$find);
     if ( $end - $cur <= 16384) {
         my $end_pos = $end - $cur;
         $end_pos = $end_pos - $end_pos % 17;
         sysseek( $fh, $cur, SEEK_SET);
         my $readed = sysread( $fh, my $buf, $end_pos);
         die "unexpected eof while reading index: $!" if $readed != $end_pos;
-        my $ret =  membinsearch($pfind, \$buf, 0, $end_pos);
+        my $ret =  membinsearch($find, \$buf, 0, $end_pos);
         if ( $ret ) {
             return [$ret->[0],$ret->[1],$ret->[2],$ret->[3]+$cur];
         }
@@ -285,30 +283,25 @@ sub binsearch {
     sysseek( $fh, $pos, SEEK_SET);
     my $readed = sysread( $fh, my $id, 8);
     die "unexpected eof with reading index: $!" if $readed < 8;
-    if ( $pfind eq $id ) {
+    if ( $find eq $id ) {
         my $readed = sysread( $fh, my $offset, 9);
         die "unexpected eof with reading index: $!" if $readed < 9;
         return [unpack('Q>Q>a',$id.$offset),$pos];
     }
-    elsif ( $pfind gt $id ) {
-        binsearch( $find, $fh, $pos, $end, $pfind);
+    elsif ( $find gt $id ) {
+        binsearch( $find, $fh, $pos, $end);
     }
-    elsif ( $pfind le $id ) {
-        binsearch( $find, $fh, $cur, $pos, $pfind);
+    elsif ( $find le $id ) {
+        binsearch( $find, $fh, $cur, $pos);
     }
 }
 
 sub search {
     my $self = shift;
     my $id = shift;
-    sysseek($self->{fh}, 0, SEEK_SET );
     my $end = sysseek($self->{fh}, 0, SEEK_END );
     return unless $end;
-    if ( !$self->{mmap} || ( $self->{mmap} && length ${$self->{mmap}} != $end ) ) {
-        mmap( my $mbuf, 0, PROT_READ, MAP_SHARED, $self->{fh}) or die "mmap: $!";
-        $self->{mmap} = \$mbuf;
-    }
-    my $ret = membinsearch(pack('Q>',$id), $self->{mmap}, 0, $end);
+    my $ret = binsearch(pack('Q>',$id), $self->{fh}, 0, $end);
     return unless $ret;
     return {
         id => $ret->[0],
