@@ -5,6 +5,7 @@ use warnings;
 use 5.10.0;
 use Fcntl qw/:DEFAULT :flock :seek/;
 use Cache::LRU;
+use Plack::Util;
 use Mouse;
 
 use Log::Minimal;
@@ -132,7 +133,6 @@ sub open_stack {
 
 sub get {
     my ($self,$id) = @_;
-
     my $index = $self->find_stack($id);
     return unless $index;
     my $stack = $self->open_stack($index);
@@ -172,8 +172,9 @@ sub put {
     my $self = shift;
     my ($id,$fh) = @_;
 
-    my $size = sysseek( $fh, 0, SEEK_END );
-    sysseek($fh, 0, SEEK_SET );
+    seek($fh, 0, 2);
+    my $size = tell($fh);
+    seek($fh, 0, 0);
 
     die 'cannot store size > max_file_size' 
         if $size + 16 >= $self->max_file_size;
@@ -195,14 +196,12 @@ sub put {
     my $len = syswrite($stack->{fh}, pack('Q>Q>',$id,$size), 16) or die $!;
     die "couldnt write object header" if $len < 16;
 
-    for (;;) {
-        my ($readed, $wrote, $pwrote);
-        defined($readed = sysread($fh, my $buf, 65536)) or die "unexpected eof: $!";
-        last unless $readed;
-        for ($wrote = 0; $wrote < $readed; $wrote += $pwrote) {
-            $pwrote = syswrite($stack->{fh}, $buf, $readed - $wrote, $wrote) or die "cannot write to stack: $!";
-        }
-    }
+    Plack::Util::foreach($fh, sub{
+        my ($wrote, $pwrote);
+        for ($wrote = 0; $wrote < length($_[0]); $wrote += $pwrote) {
+            $pwrote = syswrite($stack->{fh}, $_[0], length($_[0]) - $wrote, $wrote) or die "cannot write to stack: $!";
+        }        
+    });
 
     my $stack_index = $self->stack_index($index,$stack->{rid});
     $stack_index->add($id, $offset);
@@ -216,6 +215,7 @@ package SoupStack::Storage::StackIndex;
 use strict;
 use warnings;
 use Fcntl qw/:DEFAULT :flock :seek/;
+use MIME::Base64;
 
 sub new {
     my $class = shift;
@@ -246,6 +246,7 @@ sub add {
     die "index write error: $!" if $write < 17;
 }
 
+
 sub binsearch {
     my ($find, $fh, $cur, $end) = @_;
     return if $end - $cur < 17;
@@ -256,6 +257,9 @@ sub binsearch {
     if ( $find eq $id ) {
         sysread($fh, my $buf, 9);
         return [unpack('Q>Q>a',$id.$buf),$pos];
+    }
+    elsif ( $end - $cur == 17 ) {
+        return;
     }
     elsif ( $find gt $id ) {
         binsearch( $find, $fh, $pos, $end);

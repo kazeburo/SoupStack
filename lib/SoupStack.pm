@@ -4,6 +4,8 @@ use strict;
 use warnings;
 use 5.10.0;
 use Plack::Builder;
+use Plack::Request;
+use Plack::Response;
 use Router::Simple;
 use HTTP::Exception;
 use Try::Tiny;
@@ -30,7 +32,7 @@ has 'storage' => (
     lazy_build => 1,
 );
 
-sub _build_model {
+sub _build_storage {
     my $self = shift;
     SoupStack::Storage->new(
         root => $self->root,
@@ -43,7 +45,7 @@ __PACKAGE__->meta->make_immutable();
 sub get_object {
     my ($self,$c) = @_;
     my $id = $c->args->{id};
-    my $fh = $c->storage->get($id);
+    my $fh = $self->storage->get($id);
     HTTP::Exception->throw(404) unless $fh;
     $c->res->body($fh);
     $c->res;
@@ -52,7 +54,7 @@ sub get_object {
 sub put_object {
     my ($self,$c) = @_;
     my $id = $c->args->{id};
-    my $fh = $c->storage->put(id=>$id,fh=>$c->req->body);
+    my $fh = $self->storage->put($id,$c->req->body);
     $c->res->body('OK');
     $c->res;
 }
@@ -60,7 +62,7 @@ sub put_object {
 sub delete_object {
     my ($self,$c) = @_;
     my $id = $c->args->{id};
-    my $fh = $c->storage->get($id);
+    my $fh = $self->storage->delete($id);
     $c->res->body('OK');
     $c->res;    
 }
