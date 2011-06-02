@@ -316,8 +316,15 @@ sub delete {
     my $id = shift;
     my $search = $self->search($id);
     return unless $search;
+
     sysseek($self->{fh}, $search->{pos}, SEEK_SET);
     syswrite($self->{fh}, pack('Q>Q>a',$search->{id},$search->{offset},1), 17);
+
+    my $path = sprintf "%s/stack_%010d.deleted",$self->{root}, $self->{index};
+    sysopen( my $fh, $path, O_RDWR|O_CREAT ) or die $!;
+    flock( $fh, LOCK_EX ) or die "Couldnt get lock: $!";
+    sysseek($fh, 0, SEEK_END);
+    syswrite($fh, pack('Q>', $id), 8);
 }
 
 1;
