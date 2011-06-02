@@ -216,9 +216,6 @@ package SoupStack::Storage::StackIndex;
 use strict;
 use warnings;
 use Fcntl qw/:DEFAULT :flock :seek/;
-use Cache::LRU;
-
-my $READAHEAD=4096;
 
 sub new {
     my $class = shift;
@@ -230,7 +227,6 @@ sub new {
     sysopen( my $fh, $path, O_RDWR|O_CREAT ) or die $!;
     binmode($fh);
     $self->{fh} = $fh;
-    $self->{cache} = Cache::LRU->new(size=>200);
     $self;
 }
 
@@ -250,64 +246,16 @@ sub add {
     die "index write error: $!" if $write < 17;
 }
 
-sub membinsearch {
-    my ($find, $buf, $cur, $end ) = @_;
-    return if $end - $cur < 17;
-    my $pos = int(($cur + $end ) / 2);
-    $pos = $pos - $pos % 17;
-    my $id = substr($$buf, $pos, 8);
-    if ( $find eq $id ) {
-        return [unpack('Q>Q>a',substr($$buf, $pos, 17)), $pos];
-    }
-    elsif ( $find gt $id ) {
-        membinsearch( $find, $buf, $pos, $end);
-    }
-    elsif ( $find le $id ) {
-        membinsearch( $find, $buf, $cur, $pos);
-    }    
-}
-
-sub readahead {
-    my ($fh, $pos, $len) = @_;
-    if ( $len > $READAHEAD ) {
-        sysseek( $fh, $pos, SEEK_SET);
-        my $readed = sysread($fh, my $buf, $len);
-        die "unexpected eof in readahead: $!" if $readed < $len;
-        return $buf;
-    }
-    my $readpos = $pos - ($pos % $READAHEAD);
-    if ( $pos + $len > $readpos + $READAHEAD ) {
-        sysseek( $fh, $readpos, SEEK_SET);
-        my $readed = sysread($fh, my $buf, $READAHEAD*2 );
-        die "unexpected eof in readahead: $!" if $readed < $pos + $len - $readpos;
-        return substr( $buf, $pos - $readpos, $len);
-    }
-
-    sysseek($fh, $readpos, SEEK_SET);
-    my $readed = sysread($fh, my $buf, $READAHEAD);
-    die "unexpected eof in readahead: $!" if $readed < $pos + $len - $readpos;
-    substr( $buf, $pos - $readpos, $len);
-}
-
 sub binsearch {
     my ($find, $fh, $cur, $end) = @_;
     return if $end - $cur < 17;
-    if ( $end - $cur <= 16384) {
-        my $end_pos = $end - $cur;
-        $end_pos = $end_pos - $end_pos % 17;
-        my $buf = readahead( $fh, $cur, $end_pos);
-        my $ret =  membinsearch($find, \$buf, 0, $end_pos);
-        if ( $ret ) {
-            return [$ret->[0],$ret->[1],$ret->[2],$ret->[3]+$cur];
-        }
-        return;
-    }
     my $pos = int(($cur + $end ) / 2);
     $pos = $pos - $pos % 17;
-    my $buffer = readahead( $fh, $pos, 17);    
-    my $id = substr( $buffer, 0, 8);
+    sysseek($fh, $pos, SEEK_SET);
+    sysread($fh, my $id, 8);
     if ( $find eq $id ) {
-        return [unpack('Q>Q>a',$buffer),$pos];
+        sysread($fh, my $buf, 9);
+        return [unpack('Q>Q>a',$id.$buf),$pos];
     }
     elsif ( $find gt $id ) {
         binsearch( $find, $fh, $pos, $end);
